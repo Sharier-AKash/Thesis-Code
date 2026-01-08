@@ -1,0 +1,262 @@
+# FULL PIPELINE: Heart Disease Prediction (SVM, DT, RF, KNN, XGBoost, Logistic Regression, Naive Bayes)
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+import warnings
+import joblib
+from pathlib import Path
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+import xgboost as xgb
+
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, classification_report, confusion_matrix, roc_curve, auc
+)
+warnings.filterwarnings("ignore")
+sns.set(style="whitegrid")
+print(" Libraries imported successfully!")
+
+
+# CONFIGURABLE VARIABLES
+
+DATA_PATH = "/kaggle/input/thesis2999under/heart.csv" 
+TEST_SIZE = 0.20
+RANDOM_STATE = 42
+SVM_KERNEL = 'rbf'                  
+RF_N_ESTIMATORS = 200
+DT_MAX_DEPTH = None                 
+SAVE_MODELS = False                
+OUTPUT_DIR = Path("./heart_experiment_outputs")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------
+# LOAD & EXPLORE DATA
+
+print("\n" + "="*60)
+print("LOADING AND EXPLORING DATA")
+print("="*60)
+
+try:
+    df = pd.read_csv(DATA_PATH)
+    print(f" Data loaded successfully! Shape: {df.shape}")
+    print(f" Columns: {df.columns.tolist()}")
+except Exception as e:
+    raise SystemExit(f" Error loading data: {e}")
+
+print("\nPreview (first 5 rows):")
+display(df.head())
+
+# DEDUPLICATION
+
+orig_rows = df.shape[0]
+print(f"Original rows: {orig_rows}")
+
+df = df.drop_duplicates(keep='first')
+rows_after_pass1 = df.shape[0]
+removed_p1 = orig_rows - rows_after_pass1
+print(f" Removed {removed_p1} exact duplicate rows. Shape: {df.shape}")
+
+subset_cols = [c for c in df.columns if c != "HeartDisease"]
+if subset_cols:
+    before = df.shape[0]
+    df = df.drop_duplicates(subset=subset_cols, keep='first')
+    after = df.shape[0]
+    removed_p2 = before - after
+    print(f" Removed {removed_p2} duplicates based on subset of columns. Shape: {df.shape}")
+else:
+    print("  No subset columns found for second-pass deduplication.")
+
+total_removed = orig_rows - df.shape[0]
+print(f" Total rows removed in all passes: {total_removed}")
+print(f" New shape after deduplication: {df.shape}")
+
+
+# MISSING VALUE HANDLING
+
+print("\n" + "="*60)
+print("MISSING VALUE HANDLING")
+print("="*60)
+
+missing_report = df.isnull().sum()
+print("Missing values per column:")
+print(missing_report)
+
+n_missing_total = missing_report.sum()
+if n_missing_total == 0:
+    print(" No missing values found.")
+else:
+    print(f" Found {n_missing_total} missing values. Dropping rows with missing values.")
+    df = df.dropna()
+    print(f" New shape after dropping missing: {df.shape}")
+
+
+# TARGET & SIMPLE EDA
+
+if "HeartDisease" not in df.columns:
+    raise SystemExit("'HeartDisease' column not found. Please check dataset.")
+
+target_counts = df["HeartDisease"].value_counts().sort_index()
+print("Target counts (0 = No, 1 = Yes):")
+print(target_counts)
+
+plt.figure(figsize=(6,4))
+sns.countplot(x="HeartDisease", data=df)
+plt.title("HeartDisease class distribution (0 = No, 1 = Yes)")
+plt.xlabel("HeartDisease")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "target_distribution.png")
+plt.show()
+
+# IDENTIFY CATEGORICAL & NUMERIC FEATURES
+
+categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+if "HeartDisease" in numeric_cols:
+    numeric_cols.remove("HeartDisease")
+if "HeartDisease" in categorical_cols:
+    categorical_cols.remove("HeartDisease")
+
+print(f" Categorical columns: {categorical_cols}")
+print(f" Numeric columns: {numeric_cols}")
+
+# PREPROCESSING PIPELINE
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_cols),
+        ('num', StandardScaler(), numeric_cols)
+    ],
+    remainder='drop' 
+)
+
+
+# TRAIN/TEST SPLIT
+
+
+X = df.drop(columns=["HeartDisease"])
+y = df["HeartDisease"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+)
+
+print(f" Train shape: {X_train.shape}, Test shape: {X_test.shape}")
+print(" Target distribution in train:", np.bincount(y_train))
+print(" Target distribution in test:", np.bincount(y_test))
+
+for model_name, info in results.items():
+    print("\n" + "-"*40)
+    print(f"Model: {model_name}")
+    print("-"*40)
+    y_pred = info["y_pred"]
+    print("Classification report:")
+    print(classification_report(y_test, y_pred, digits=4))
+    
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(5,4))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title(f"Confusion Matrix - {model_name}")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / f"confusion_matrix_{model_name.replace(' ', '_')}.png")
+    plt.show()
+
+
+# STEP 10: ROC CURVES
+
+print("\n" + "="*60)
+print("STEP 10: ROC CURVES")
+print("="*60)
+
+plt.figure(figsize=(8,6))
+for model_name, info in results.items():
+    prob = info["y_prob"]
+
+    if len(np.unique(y_test)) == 2 and np.unique(prob).shape[0] > 1:
+        fpr, tpr, _ = roc_curve(y_test, prob)
+        roc_auc_val = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f"{model_name} (AUC = {roc_auc_val:.3f})")
+    else:
+        print(f" Skipping ROC for {model_name}: not enough unique prob values or non-binary target.")
+    
+plt.plot([0,1],[0,1],'k--', linewidth=0.8)
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curves")
+plt.legend(loc="lower right")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "roc_curves.png")
+plt.show()
+
+
+# STEP 11: RESULTS COMPARISON TABLE & PLOTTING
+
+print("\n" + "="*60)
+print("RESULTS")
+print("="*60)
+
+results_df = pd.DataFrame([
+    {
+        "Model": name,
+        "Accuracy": info["accuracy"],
+        "Precision": info["precision"],
+        "Recall": info["recall"],
+        "F1": info["f1_score"],
+        "ROC_AUC": info["roc_auc"],
+        "TrainTimeSec": info["train_time_sec"]
+    }
+    for name, info in results.items()
+])
+
+print("\nFinal results table:")
+display(results_df.sort_values("Accuracy", ascending=False).reset_index(drop=True))
+
+fig, axes = plt.subplots(1,3, figsize=(18,5))
+sns.barplot(x="Accuracy", y="Model", data=results_df.sort_values("Accuracy", ascending=False), ax=axes[0])
+axes[0].set_title("Accuracy Comparison")
+
+sns.barplot(x="F1", y="Model", data=results_df.sort_values("F1", ascending=False), ax=axes[1])
+axes[1].set_title("F1-score Comparison")
+
+sns.barplot(x="TrainTimeSec", y="Model", data=results_df.sort_values("TrainTimeSec", ascending=False), ax=axes[2])
+axes[2].set_title("Training Time (s) Comparison")
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "model_comparisons.png")
+plt.show()
+
+
+# FINAL SUMMARY PRINTS
+
+print("FINAL SUMMARY")
+print("="*60)
+
+best_acc_model = results_df.loc[results_df["Accuracy"].idxmax()]["Model"]
+best_f1_model = results_df.loc[results_df["F1"].idxmax()]["Model"]
+fastest_model = results_df.loc[results_df["TrainTimeSec"].idxmin()]["Model"]
+
+print(f" Dataset shape (after cleaning): {df.shape}")
+print(f" Total models trained: {len(results_df)}")
+print(f" Best model by Accuracy: {best_acc_model}")
+print(f" Best model by F1: {best_f1_model}")
+print(f" Fastest training model: {fastest_model}")
+
+print("\n Per-model metrics:")
+print(results_df.round(4).to_string(index=False))
