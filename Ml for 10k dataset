@@ -1,0 +1,239 @@
+# Heart Disease Prediction (SVM, DT, RF, KNN, XGBoost, Logistic Regression, Naive Bayes)
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+import warnings
+import joblib
+from pathlib import Path
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+import xgboost as xgb
+
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, classification_report, confusion_matrix, roc_curve, auc
+)
+
+# CONFIGURABLE VARIABLES
+DATA_PATH = "/kaggle/input/thesisdatasetnew/heart_failure_prediction.csv"  # Updated path to the dataset
+TEST_SIZE = 0.20
+RANDOM_STATE = 42
+SVM_KERNEL = 'rbf'
+RF_N_ESTIMATORS = 200
+DT_MAX_DEPTH = None
+SAVE_MODELS = False
+OUTPUT_DIR = Path("./heart_experiment_outputs")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------
+# LOAD & EXPLORE DATA
+
+print("\n" + "="*60)
+print("LOADING AND EXPLORING DATA")
+print("="*60)
+
+# Load the dataset
+try:
+    df = pd.read_csv(DATA_PATH)
+    print(f"Data loaded successfully! Shape: {df.shape}")
+    print(f"Columns: {df.columns.tolist()}")
+except Exception as e:
+    raise SystemExit(f"Error loading data: {e}")
+
+print("\nPreview (first 5 rows):")
+display(df.head())
+
+# DEDUPLICATION
+orig_rows = df.shape[0]
+print(f"Original rows: {orig_rows}")
+df = df.drop_duplicates(keep='first')
+rows_after_pass1 = df.shape[0]
+removed_p1 = orig_rows - rows_after_pass1
+print(f"Removed {removed_p1} exact duplicate rows. Shape: {df.shape}")
+
+# MISSING VALUE HANDLING
+print("\n" + "="*60)
+print("MISSING VALUE HANDLING")
+print("="*60)
+
+missing_report = df.isnull().sum()
+print("Missing values per column:")
+print(missing_report)
+
+n_missing_total = missing_report.sum()
+if n_missing_total == 0:
+    print("No missing values found.")
+else:
+    print(f"Found {n_missing_total} missing values. Dropping rows with missing values.")
+    df = df.dropna()
+    print(f"New shape after dropping missing: {df.shape}")
+
+# TARGET & SIMPLE EDA
+if "Heart_Failure" not in df.columns:
+    raise SystemExit("'Heart_Failure' column not found. Please check dataset.")
+
+target_counts = df["Heart_Failure"].value_counts().sort_index()
+print("Target counts (0 = No, 1 = Yes):")
+print(target_counts)
+
+plt.figure(figsize=(6,4))
+sns.countplot(x="Heart_Failure", data=df)
+plt.title("Heart Failure Class Distribution (0 = No, 1 = Yes)")
+plt.xlabel("Heart Failure")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "target_distribution.png")
+plt.show()
+
+# IDENTIFY CATEGORICAL & NUMERIC FEATURES
+categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+if "Heart_Failure" in numeric_cols:
+    numeric_cols.remove("Heart_Failure")
+if "Heart_Failure" in categorical_cols:
+    categorical_cols.remove("Heart_Failure")
+
+print(f"Categorical columns: {categorical_cols}")
+print(f"Numeric columns: {numeric_cols}")
+
+# PREPROCESSING PIPELINE
+preprocessor = ColumnTransformer(
+    transformers=[('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_cols),
+                  ('num', StandardScaler(), numeric_cols)],
+    remainder='drop' 
+)
+
+# TRAIN/TEST SPLIT
+X = df.drop(columns=["Heart_Failure"])
+y = df["Heart_Failure"]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y)
+
+print(f"Train shape: {X_train.shape}, Test shape: {X_test.shape}")
+print("Target distribution in train:", np.bincount(y_train))
+print("Target distribution in test:", np.bincount(y_test))
+
+# MODEL TRAINING
+models = {
+    "SVM": SVC(kernel=SVM_KERNEL, random_state=RANDOM_STATE),
+    "Decision Tree": DecisionTreeClassifier(max_depth=DT_MAX_DEPTH, random_state=RANDOM_STATE),
+    "Random Forest": RandomForestClassifier(n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE),
+    "KNN": KNeighborsClassifier(),
+    "Logistic Regression": LogisticRegression(random_state=RANDOM_STATE),
+    "Naive Bayes": GaussianNB(),
+    "XGBoost": xgb.XGBClassifier(random_state=RANDOM_STATE)
+}
+
+results = {}
+for model_name, model in models.items():
+    start_time = time.time()
+    model.fit(preprocessor.fit_transform(X_train), y_train)
+    train_time = time.time() - start_time
+    y_pred = model.predict(preprocessor.transform(X_test))
+    y_prob = model.predict_proba(preprocessor.transform(X_test))[:, 1] if hasattr(model, 'predict_proba') else y_pred
+    
+    # Evaluation metrics
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    roc_auc = roc_auc_score(y_test, y_prob)
+    
+    results[model_name] = {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "roc_auc": roc_auc,
+        "train_time_sec": train_time,
+        "y_pred": y_pred,
+        "y_prob": y_prob
+    }
+
+for model_name, info in results.items():
+    print(f"\n{model_name} Metrics:")
+    print(f" Accuracy: {info['accuracy']}")
+    print(f" Precision: {info['precision']}")
+    print(f" Recall: {info['recall']}")
+    print(f" F1-Score: {info['f1_score']}")
+    print(f" ROC AUC: {info['roc_auc']}")
+    print(f" Training time: {info['train_time_sec']:.2f} seconds")
+    print("="*40)
+
+# ROC CURVES
+print("\n" + "="*60)
+print("STEP 10: ROC CURVES")
+print("="*60)
+
+plt.figure(figsize=(6, 4))
+
+for model_name, info in results.items():
+    prob = info["y_prob"]
+
+    if len(np.unique(y_test)) == 2 and np.unique(prob).shape[0] > 1:
+        fpr, tpr, _ = roc_curve(y_test, prob)
+        roc_auc_val = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f"{model_name} (AUC = {roc_auc_val:.3f})")
+    else:
+        print(f"Skipping ROC for {model_name}: not enough unique prob values or non-binary target.")
+    
+plt.plot([0, 1], [0, 1], 'k--', linewidth=0.8)
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curves")
+plt.legend(loc="lower right")
+plt.tight_layout()
+
+
+plt.savefig(OUTPUT_DIR / "roc_curves_small.png")
+plt.show()
+
+if SAVE_MODELS:
+    for model_name, model in models.items():
+        model_filename = OUTPUT_DIR / f"{model_name.replace(' ', '_')}_model.pkl"
+        joblib.dump(model, model_filename)
+        print(f"Saved {model_name} model to {model_filename}")
+
+# Result
+print("\n" + "="*60)
+print("RESULTS SUMMARY - ACCURACY")
+print("="*60)
+
+
+accuracy_results = pd.DataFrame([
+    {
+        "Model": model_name,
+        "Accuracy": info["accuracy"],
+        "Train Time (sec)": info["train_time_sec"]
+    }
+    for model_name, info in results.items()
+])
+
+
+accuracy_results = accuracy_results.sort_values(by="Accuracy", ascending=False)
+
+
+print("Accuracy Summary (sorted by accuracy):")
+display(accuracy_results)
+
+plt.figure(figsize=(6, 4))
+sns.barplot(x="Accuracy", y="Model", data=accuracy_results)
+plt.title("Model Accuracy Comparison")
+plt.xlabel("Accuracy")
+plt.ylabel("Model")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "accuracy_comparison.png")
+plt.show()
