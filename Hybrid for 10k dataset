@@ -1,0 +1,159 @@
+# Full Hybrid Model
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+from pathlib import Path
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+import xgboost as xgb
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score, roc_curve, auc
+
+# CONFIGURABLE VARIABLES
+DATA_PATH = "/kaggle/input/thesisdatasetnew/heart_failure_prediction.csv"  # Path to dataset
+TEST_SIZE = 0.20
+RANDOM_STATE = 42
+RF_N_ESTIMATORS = 200
+OUTPUT_DIR = Path("./heart_experiment_outputs")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+#  LOAD DATA
+df = pd.read_csv(DATA_PATH)
+X = df.drop(columns=["Heart_Failure"])
+y = df["Heart_Failure"]
+
+# DEDUPLICATION
+orig_rows = df.shape[0]
+print(f"Original rows: {orig_rows}")
+df = df.drop_duplicates(keep='first')
+rows_after_pass1 = df.shape[0]
+removed_p1 = orig_rows - rows_after_pass1
+print(f"Removed {removed_p1} exact duplicate rows. Shape: {df.shape}")
+
+# MISSING VALUE HANDLING
+print("\n" + "="*60)
+print("MISSING VALUE HANDLING")
+print("="*60)
+missing_report = df.isnull().sum()
+print("Missing values per column:")
+print(missing_report)
+
+n_missing_total = missing_report.sum()
+if n_missing_total == 0:
+    print("No missing values found.")
+else:
+    print(f"Found {n_missing_total} missing values. Dropping rows with missing values.")
+    df = df.dropna()
+    print(f"New shape after dropping missing: {df.shape}")
+
+# TARGET & SIMPLE EDA
+print("\n" + "="*60)
+print("TARGET DISTRIBUTION & SIMPLE EDA")
+print("="*60)
+
+if "Heart_Failure" not in df.columns:
+    raise SystemExit("'Heart_Failure' column not found. Please check dataset.")
+
+# map target to descriptive labels for plots
+target_counts = df["Heart_Failure"].value_counts().sort_index()
+print("Target counts (0 = No, 1 = Yes):")
+print(target_counts)
+
+plt.figure(figsize=(6,4))
+sns.countplot(x="Heart_Failure", data=df)
+plt.title("Heart Failure Class Distribution (0 = No, 1 = Yes)")
+plt.xlabel("Heart Failure")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "target_distribution.png")
+plt.show()
+
+# IDENTIFY CATEGORICAL & NUMERIC FEATURES
+categorical_cols = X.select_dtypes(include=['object']).columns.tolist()
+numeric_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+if "Heart_Failure" in numeric_cols:
+    numeric_cols.remove("Heart_Failure")
+if "Heart_Failure" in categorical_cols:
+    categorical_cols.remove("Heart_Failure")
+
+print(f"Categorical columns: {categorical_cols}")
+print(f"Numeric columns: {numeric_cols}")
+
+# PREPROCESSING PIPELINE
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_cols), 
+        ('num', StandardScaler(), numeric_cols)  
+    ])
+
+# TRAIN/TEST SPLIT
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y)
+
+X_train_processed = preprocessor.fit_transform(X_train)
+X_test_processed = preprocessor.transform(X_test)
+
+#DEFINE BASE LEARNERS
+dt = DecisionTreeClassifier(random_state=RANDOM_STATE)
+rf = RandomForestClassifier(n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE, n_jobs=-1)
+svm = SVC(kernel='rbf', probability=True, random_state=RANDOM_STATE)
+lr = LogisticRegression(random_state=RANDOM_STATE)
+
+# VOTING CLASSIFIER (Soft Voting)
+voting_classifier = VotingClassifier(estimators=[
+    ('dt', dt),
+    ('rf', rf),
+    ('svm', svm),
+    ('lr', lr)
+], voting='soft')  
+
+# 5-FOLD CROSS-VALIDATION
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+cv_scores = cross_val_score(voting_classifier, X_train_processed, y_train, cv=cv, scoring='accuracy')
+print(f"Cross-validation scores for Voting Classifier: {cv_scores}")
+print(f"Mean accuracy from cross-validation: {cv_scores.mean():.4f}")
+
+# TRAIN AND EVALUATE THE FINAL MODEL
+voting_classifier.fit(X_train_processed, y_train)
+
+y_pred = voting_classifier.predict(X_test_processed)
+y_prob = voting_classifier.predict_proba(X_test_processed)[:, 1]
+
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy of Voting Classifier: {accuracy:.4f}")
+
+# CLASSIFICATION REPORT AND CONFUSION MATRIX
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(5,4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.title("Confusion Matrix - Voting Classifier")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "confusion_matrix_voting_classifier.png")
+plt.show()
+
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+roc_auc_val = auc(fpr, tpr)
+
+plt.figure(figsize=(8,6))
+plt.plot(fpr, tpr, label=f"Voting Classifier (AUC = {roc_auc_val:.3f})")
+plt.plot([0, 1], [0, 1], 'k--', linewidth=0.8)
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve - Voting Classifier")
+plt.legend(loc="lower right")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "roc_curve_voting_classifier.png")
+plt.show()
